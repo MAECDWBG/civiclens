@@ -1,0 +1,873 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>CivicLens — Community Hero</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f0fdf4;min-height:100vh}
+#root{max-width:480px;margin:0 auto;min-height:100vh;display:flex;flex-direction:column;position:relative}
+input,textarea,button{font-family:inherit}
+textarea{resize:none}
+.spin{animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.bounce{animation:bou .8s infinite alternate}
+@keyframes bou{to{transform:translateY(-12px)}}
+::-webkit-scrollbar{width:4px}
+::-webkit-scrollbar-thumb{background:#bbf7d0;border-radius:4px}
+.clamp2{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+
+const GEMINI_KEY = "AQ.Ab8RN6If2nqHngw3UFd-8Bk6CHoqoykuWUROFIGStC4jg6xfgw";
+
+const P="#14532d", P2="#16a34a", ACC="#ea580c";
+
+const CAT={
+  pothole:    {label:"Pothole",     icon:"🕳️",color:"#dc2626",bg:"#fef2f2"},
+  water:      {label:"Water Leak",  icon:"💧",color:"#2563eb",bg:"#eff6ff"},
+  streetlight:{label:"Streetlight", icon:"💡",color:"#d97706",bg:"#fffbeb"},
+  waste:      {label:"Waste Dump",  icon:"🗑️",color:"#16a34a",bg:"#f0fdf4"},
+  other:      {label:"Other",       icon:"⚠️",color:"#7c3aed",bg:"#f5f3ff"},
+};
+const SEV={
+  low:    {label:"Low",     c:"#059669",bg:"#d1fae5"},
+  medium: {label:"Medium",  c:"#d97706",bg:"#fef3c7"},
+  high:   {label:"High",    c:"#dc2626",bg:"#fee2e2"},
+  critical:{label:"Critical",c:"#7c3aed",bg:"#ede9fe"},
+};
+const STA={
+  reported:     {label:"Reported",   c:"#6b7280",icon:"🔔"},
+  verified:     {label:"Verified",   c:"#2563eb",icon:"🛡️"},
+  "in-progress":{label:"In Progress",c:"#d97706",icon:"⚙️"},
+  resolved:     {label:"Resolved",   c:"#16a34a",icon:"✅"},
+};
+const STATUS_STEPS=["reported","verified","in-progress","resolved"];
+
+const SEED=[
+  {id:"1",title:"Deep Pothole — Main Junction",category:"pothole",severity:"high",
+   description:"Large dangerous pothole near the main junction causing vehicle damage and near-accidents. Congestion worsens during peak hours.",
+   location:"MG Road, Near City Center Mall",status:"in-progress",upvotes:47,reporter:"Rahul S.",
+   timestamp:Date.now()-2*864e5,department:"Roads & Infrastructure Dept.",verified:true,verifications:23,comments:12,tags:["road","safety","urgent"]},
+  {id:"2",title:"Three Street Lights Out",category:"streetlight",severity:"medium",
+   description:"Consecutive street lights non-functional on Park Street Block 4. Dangerous at night for pedestrians and motorists.",
+   location:"Park Street, Block 4",status:"verified",upvotes:31,reporter:"Priya M.",
+   timestamp:Date.now()-864e5,department:"City Electricity Board",verified:true,verifications:15,comments:8,tags:["lighting","safety"]},
+  {id:"3",title:"Water Pipeline Burst — Flooding",category:"water",severity:"critical",
+   description:"Major pipeline burst flooding the road. Water wastage and road damage. Residents unable to access homes. Immediate attention needed.",
+   location:"Gandhi Nagar, Sector 5",status:"reported",upvotes:89,reporter:"Amit K.",
+   timestamp:Date.now()-3*36e5,department:"Water Supply Board",verified:false,verifications:7,comments:24,tags:["water","flooding","critical"]},
+  {id:"4",title:"Illegal Garbage Near Children's Park",category:"waste",severity:"high",
+   description:"Illegal dumping next to children's playground. Strong odour, health hazard. Children cannot use the park.",
+   location:"Nehru Park, West Wing",status:"resolved",upvotes:28,reporter:"Sunita R.",
+   timestamp:Date.now()-5*864e5,department:"Sanitation Department",verified:true,verifications:31,comments:6,tags:["health","children"]},
+  {id:"5",title:"Broken Footpath Tiles — Bus Stop",category:"other",severity:"medium",
+   description:"Multiple cracked tiles near Bus Stop 12. Tripping hazard especially for elderly and differently-abled commuters.",
+   location:"Commercial Street, Bus Stop 12",status:"reported",upvotes:19,reporter:"Vijay P.",
+   timestamp:Date.now()-4*864e5,department:"Roads & Infrastructure Dept.",verified:false,verifications:4,comments:3,tags:["pedestrian","accessibility"]},
+];
+
+const BOARD=[
+  {name:"Rahul S.",pts:1240,issues:28,medal:"🥇"},
+  {name:"Priya M.",pts:980, issues:22,medal:"🥈"},
+  {name:"Amit K.", pts:760, issues:17,medal:"🥉"},
+  {name:"Sunita R.",pts:620,issues:14,medal:"⭐"},
+  {name:"You",     pts:340, issues:8, medal:"🌟",me:true},
+];
+
+// State
+let state = {
+  view:"feed", issues:[...SEED], filter:"all", search:"",
+  selected:null, step:1, form:{description:"",location:""},
+  analysis:null, aiLoading:false,
+  complaint:"", cLoading:false, showC:false,
+  pts:340, done:false, imgPrev:null,
+  insightText:"", insightLoading:false,
+};
+
+// Try load persisted issues
+try{const s=localStorage.getItem("cl-issues");if(s)state.issues=[...SEED,...JSON.parse(s)];}catch{}
+
+function setState(patch){Object.assign(state,typeof patch==="function"?patch(state):patch);render();}
+
+// Helpers
+const ago = ts=>{
+  const s=(Date.now()-ts)/1e3;
+  if(s<3600)return Math.floor(s/60)+"m ago";
+  if(s<86400)return Math.floor(s/3600)+"h ago";
+  return Math.floor(s/86400)+"d ago";
+};
+
+const callAI = async prompt=>{
+  const res=await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`,
+    {method:"POST",headers:{"Content-Type":"application/json"},
+     body:JSON.stringify({contents:[{parts:[{text:prompt}]}]})}
+  );
+  const d=await res.json();
+  return d.candidates[0].content.parts[0].text;
+};
+
+// DOM Helpers
+const h=(tag,attrs={},children=[])=>{
+  const el=document.createElement(tag);
+  for(const [k,v] of Object.entries(attrs)){
+    if(k==="style"&&typeof v==="object")Object.assign(el.style,v);
+    else if(k.startsWith("on"))el.addEventListener(k.slice(2).toLowerCase(),v);
+    else if(k==="className")el.className=v;
+    else el.setAttribute(k,v);
+  }
+  for(const c of children){
+    if(c==null||c===false||c===undefined)continue;
+    el.appendChild(typeof c==="string"?document.createTextNode(c):c);
+  }
+  return el;
+};
+const div=(a,c)=>h("div",a,c);
+const span=(a,c)=>h("span",a,c);
+const btn=(a,c)=>h("button",a,c);
+const p=(a,c)=>h("p",a,c);
+const svg=(w,ht,children)=>{
+  const el=document.createElementNS("http://www.w3.org/2000/svg","svg");
+  el.setAttribute("width",w);el.setAttribute("height",ht);el.setAttribute("viewBox",`0 0 ${w} ${ht}`);
+  for(const c of children)el.appendChild(c);
+  return el;
+};
+const svgEl=(tag,attrs)=>{
+  const el=document.createElementNS("http://www.w3.org/2000/svg",tag);
+  for(const[k,v]of Object.entries(attrs))el.setAttribute(k,v);
+  return el;
+};
+
+// UI Components
+const pill=(text,c,bg)=>span({style:{color:c,backgroundColor:bg,fontSize:11,fontWeight:700,
+  padding:"2px 8px",borderRadius:99,whiteSpace:"nowrap",display:"inline-flex",alignItems:"center",marginRight:4}},
+  [text]);
+
+const spinner=(size=24,color=P2)=>{
+  const el=div({style:{width:size,height:size,border:`3px solid ${color}33`,
+    borderTop:`3px solid ${color}`,borderRadius:"50%"},className:"spin"});
+  return el;
+};
+
+// Bar Chart (pure CSS)
+const barChart=(data,height=150)=>{
+  const max=Math.max(...data.map(d=>d.count),1);
+  const wrap=div({style:{display:"flex",alignItems:"flex-end",gap:8,height:height+"px",padding:"0 4px"}});
+  for(const d of data){
+    const pct=(d.count/max)*100;
+    const col=div({style:{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:4}});
+    const barWrap=div({style:{flex:1,width:"100%",display:"flex",alignItems:"flex-end"}});
+    const bar=div({style:{width:"100%",height:pct+"%",background:d.fill,borderRadius:"6px 6px 0 0",
+      minHeight:d.count>0?8:0,transition:"height .3s",position:"relative"}});
+    // value label
+    if(d.count>0){
+      const lbl=span({style:{position:"absolute",top:-18,left:"50%",transform:"translateX(-50%)",
+        fontSize:10,fontWeight:700,color:"#374151"}},[""+d.count]);
+      bar.appendChild(lbl);
+    }
+    barWrap.appendChild(bar);
+    col.appendChild(barWrap);
+    col.appendChild(span({style:{fontSize:10,color:"#9ca3af",textAlign:"center"}},[d.name]));
+    wrap.appendChild(col);
+  }
+  return wrap;
+};
+
+// Line Chart (SVG)
+const lineChart=(data,w=300,ht=110)=>{
+  const max=Math.max(...data.map(d=>d.n),1);
+  const pts=data.map((d,i)=>({
+    x:20+(i/(data.length-1))*(w-40),
+    y:ht-20-((d.n/max)*(ht-40))
+  }));
+  const polyline=pts.map(p=>p.x+","+p.y).join(" ");
+  const elements=[
+    svgEl("polyline",{points:polyline,fill:"none",stroke:P2,strokeWidth:2.5,strokeLinejoin:"round"}),
+  ];
+  for(const pt of pts){
+    elements.push(svgEl("circle",{cx:pt.x,cy:pt.y,r:3.5,fill:P2}));
+  }
+  // x labels
+  for(let i=0;i<data.length;i++){
+    const t=svgEl("text",{x:pts[i].x,y:ht-4,"text-anchor":"middle","font-size":"9","fill":"#9ca3af"});
+    t.textContent=data[i].d;
+    elements.push(t);
+  }
+  // grid lines
+  for(let i=0;i<=3;i++){
+    const y=20+i*((ht-40)/3);
+    elements.unshift(svgEl("line",{x1:20,y1:y,x2:w-20,y2:y,stroke:"#f0f0f0",strokeWidth:1}));
+  }
+  const s=svg(w,ht,elements);
+  s.style.width="100%";s.style.height=ht+"px";
+  return s;
+};
+
+// Pie Chart (SVG)
+const pieChart=(data,size=110)=>{
+  const cx=size/2,cy=size/2,r=40,ri=26;
+  let startAngle=-Math.PI/2;
+  const total=data.reduce((a,d)=>a+d.value,0)||1;
+  const elements=[];
+  for(const d of data){
+    if(!d.value)continue;
+    const angle=(d.value/total)*Math.PI*2;
+    const x1=cx+r*Math.cos(startAngle),y1=cy+r*Math.sin(startAngle);
+    const x2=cx+r*Math.cos(startAngle+angle),y2=cy+r*Math.sin(startAngle+angle);
+    const xi1=cx+ri*Math.cos(startAngle),yi1=cy+ri*Math.sin(startAngle);
+    const xi2=cx+ri*Math.cos(startAngle+angle),yi2=cy+ri*Math.sin(startAngle+angle);
+    const large=angle>Math.PI?1:0;
+    const path=svgEl("path",{
+      d:`M ${xi1} ${yi1} L ${x1} ${y1} A ${r} ${r} 0 ${large} 1 ${x2} ${y2} L ${xi2} ${yi2} A ${ri} ${ri} 0 ${large} 0 ${xi1} ${yi1} Z`,
+      fill:d.fill,stroke:"white",strokeWidth:2
+    });
+    elements.push(path);
+    startAngle+=angle;
+  }
+  const s=svg(size,size,elements);
+  s.style.flexShrink=0;
+  return s;
+};
+
+// Issue Card
+const issueCard=(issue)=>{
+  const cat=CAT[issue.category]||CAT.other;
+  const sev=SEV[issue.severity]||SEV.medium;
+  const sta=STA[issue.status]||STA.reported;
+  const card=div({style:{borderLeft:`4px solid ${sev.c}`,background:"white",borderRadius:18,
+    padding:16,boxShadow:"0 1px 4px rgba(0,0,0,.07)",cursor:"pointer",marginBottom:12}});
+  card.addEventListener("mouseenter",()=>card.style.boxShadow="0 4px 16px rgba(0,0,0,.12)");
+  card.addEventListener("mouseleave",()=>card.style.boxShadow="0 1px 4px rgba(0,0,0,.07)");
+  card.addEventListener("click",()=>{setState({selected:issue});});
+
+  const top=div({style:{display:"flex",gap:12,alignItems:"flex-start"}});
+  const ico=div({style:{background:cat.bg,width:40,height:40,borderRadius:12,
+    display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0}},[cat.icon]);
+  const info=div({style:{flex:1,minWidth:0}});
+  const badges=div({style:{display:"flex",flexWrap:"wrap",gap:4,marginBottom:4}});
+  badges.appendChild(pill(cat.label,cat.color,cat.bg));
+  badges.appendChild(pill(sev.label,sev.c,sev.bg));
+  if(issue.verified)badges.appendChild(pill("✓ Verified","#2563eb","#dbeafe"));
+  const title=h("div",{style:{fontWeight:700,fontSize:14,color:"#111",lineHeight:1.3}},[issue.title]);
+  const loc=span({style:{fontSize:11,color:"#9ca3af"}},[`📍 ${issue.location}`]);
+  info.append(badges,title,loc);
+  top.append(ico,info);
+
+  const desc=p({className:"clamp2",style:{fontSize:12,color:"#6b7280",marginTop:8,lineHeight:1.5}},[issue.description]);
+
+  const foot=div({style:{display:"flex",justifyContent:"space-between",alignItems:"center",
+    marginTop:12,paddingTop:10,borderTop:"1px solid #f9fafb"}});
+  const left=div({style:{display:"flex",gap:14,alignItems:"center"}});
+  const upvoteBtn=btn({style:{display:"flex",alignItems:"center",gap:4,fontSize:12,fontWeight:700,
+    color:"#6b7280",background:"none",border:"none",cursor:"pointer"},
+    onClick:(e)=>{e.stopPropagation();
+      state.issues=state.issues.map(i=>i.id===issue.id?{...i,upvotes:i.upvotes+1}:i);
+      state.pts+=5; render();
+    }},["👍 "+issue.upvotes]);
+  left.append(upvoteBtn,span({style:{fontSize:12,color:"#9ca3af"}},["💬 "+issue.comments]),span({style:{fontSize:12,color:"#9ca3af"}},["👥 "+issue.verifications]));
+  const right=div({style:{display:"flex",alignItems:"center",gap:5,fontSize:12}});
+  right.append(span({},[sta.icon]),span({style:{fontWeight:700,color:sta.c}},[sta.label]),
+    span({style:{color:"#d1d5db"}},["·"]),span({style:{color:"#9ca3af"}},[ago(issue.timestamp)]));
+  foot.append(left,right);
+  card.append(top,desc,foot);
+  return card;
+};
+
+// Views
+function renderFeed(){
+  const wrap=div({style:{padding:"0"}});
+  // Search
+  const searchWrap=div({style:{position:"relative",marginBottom:12}});
+  const searchIco=span({style:{position:"absolute",left:14,top:"50%",transform:"translateY(-50%)",fontSize:16,pointerEvents:"none"}},["🔍"]);
+  const searchInp=h("input",{style:{width:"100%",border:"1.5px solid #e5e7eb",borderRadius:12,
+    padding:"11px 14px 11px 42px",fontSize:14,outline:"none",background:"white"},
+    placeholder:"Search issues or locations…",value:state.search});
+  searchInp.addEventListener("input",e=>{state.search=e.target.value;render();});
+  searchWrap.append(searchIco,searchInp);
+
+  // Filters
+  const filters=div({style:{display:"flex",gap:8,overflowX:"auto",paddingBottom:8,marginBottom:12}});
+  for(const[k,l]of[["all","All"],["active","Active"],["critical","⚠ Critical"],["resolved","✓ Resolved"]]){
+    const active=state.filter===k;
+    const b=btn({style:{flexShrink:0,padding:"6px 16px",borderRadius:99,border:"none",cursor:"pointer",
+      fontWeight:700,fontSize:12,background:active?P2:"white",color:active?"white":"#6b7280",
+      boxShadow:active?"0 2px 8px rgba(22,163,74,.3)":"0 1px 3px rgba(0,0,0,.08)"},
+      onClick:()=>{state.filter=k;render();}},[l]);
+    filters.appendChild(b);
+  }
+
+  // Stats
+  const stats=div({style:{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:16}});
+  const resolved=state.issues.filter(i=>i.status==="resolved").length;
+  const active=state.issues.filter(i=>i.status!=="resolved").length;
+  for(const s of [{l:"Total",v:state.issues.length,c:"#111"},{l:"Active",v:active,c:ACC},{l:"Resolved",v:resolved,c:P2}]){
+    stats.appendChild(div({style:{background:"white",borderRadius:14,padding:"12px 8px",textAlign:"center",
+      boxShadow:"0 1px 4px rgba(0,0,0,.07)"}},
+      [div({style:{fontSize:22,fontWeight:900,color:s.c}},[String(s.v)]),
+       span({style:{fontSize:11,color:"#9ca3af"}},[s.l])]));
+  }
+
+  // Issues
+  const filtered=state.issues.filter(i=>{
+    const fOk=state.filter==="all"||(state.filter==="active"&&i.status!=="resolved")||
+      (state.filter==="resolved"&&i.status==="resolved")||(state.filter==="critical"&&["high","critical"].includes(i.severity));
+    const sOk=!state.search||i.title.toLowerCase().includes(state.search.toLowerCase())||i.location.toLowerCase().includes(state.search.toLowerCase());
+    return fOk&&sOk;
+  });
+  const list=div({});
+  if(filtered.length===0){
+    list.appendChild(div({style:{textAlign:"center",padding:"48px 0",color:"#d1d5db"}},
+      [div({style:{fontSize:40}},["📍"]),div({style:{fontSize:14,marginTop:8}},["No issues found"])]));
+  } else {
+    for(const i of filtered)list.appendChild(issueCard(i));
+  }
+  wrap.append(searchWrap,filters,stats,list);
+  return wrap;
+}
+
+function renderReport(){
+  if(state.done){
+    return div({style:{textAlign:"center",padding:"80px 20px"}},
+      [div({style:{fontSize:60},className:"bounce"},["✅"]),
+       div({style:{fontWeight:900,fontSize:22,marginTop:16}},["Issue Reported!"]),
+       p({style:{color:"#9ca3af",marginTop:8}},["Your community thanks you."]),
+       div({style:{display:"inline-block",background:P2,color:"white",borderRadius:99,
+         padding:"10px 24px",fontWeight:700,marginTop:16}},["🌟 +50 pts — Now "+state.pts+" total"])]);
+  }
+
+  const wrap=div({});
+  // Step indicator
+  const steps=div({style:{display:"flex",alignItems:"center",marginBottom:8}});
+  for(let s=1;s<=3;s++){
+    const dot=div({style:{width:28,height:28,borderRadius:99,display:"flex",alignItems:"center",
+      justifyContent:"center",fontSize:12,fontWeight:900,flexShrink:0,
+      background:state.step>=s?P2:"#e5e7eb",color:state.step>=s?"white":"#9ca3af"}},[state.step>s?"✓":String(s)]);
+    steps.appendChild(dot);
+    if(s<3)steps.appendChild(div({style:{flex:1,height:3,borderRadius:2,margin:"0 4px",background:state.step>s?P2:"#e5e7eb"}}));
+  }
+  const stepLabels=div({style:{display:"flex",justifyContent:"space-between",fontSize:11,color:"#9ca3af",marginBottom:20}},
+    [span({},[" Describe"]),span({},[" AI Review"]),span({},[" Submit"])]);
+  wrap.append(steps,stepLabels);
+
+  // Step 1
+  if(state.step===1){
+    const s1=div({});
+    const inp=(label,key,type="input",rows=1)=>{
+      const lbl=h("label",{style:{fontSize:12,fontWeight:700,color:"#374151",display:"block",
+        marginBottom:6,textTransform:"uppercase",letterSpacing:".05em"}},[label]);
+      const el=type==="textarea"
+        ? h("textarea",{rows:rows,style:{width:"100%",border:"1.5px solid #e5e7eb",borderRadius:12,
+            padding:"12px 14px",fontSize:14,outline:"none",marginBottom:14},
+            placeholder:key==="description"?"Describe what you see — what, where, and how it affects people…":"Street, landmark, area…"})
+        : h("input",{style:{width:"100%",border:"1.5px solid #e5e7eb",borderRadius:12,
+            padding:"12px 14px",fontSize:14,outline:"none",marginBottom:14},
+            placeholder:"Street, landmark, area…"});
+      el.value=state.form[key]||"";
+      el.addEventListener("input",e=>{state.form={...state.form,[key]:e.target.value};});
+      return div({},[lbl,el]);
+    };
+    s1.appendChild(inp("What's the issue? *","description","textarea",4));
+    s1.appendChild(inp("Location *","location"));
+
+    // Photo
+    const fileInp=h("input",{type:"file",accept:"image/*",style:{display:"none"}});
+    fileInp.addEventListener("change",e=>{
+      const f=e.target.files[0];
+      if(f){state.imgPrev=URL.createObjectURL(f);render();}
+    });
+    const photoDrop=div({style:{border:"2px dashed",borderColor:state.imgPrev?"#16a34a":"#e5e7eb",
+      borderRadius:14,padding:24,textAlign:"center",cursor:"pointer",marginBottom:14}});
+    photoDrop.addEventListener("click",()=>fileInp.click());
+    if(state.imgPrev){
+      const img=h("img",{src:state.imgPrev,style:{width:"100%",height:120,objectFit:"cover",borderRadius:10}});
+      const chk=div({style:{textAlign:"right",fontSize:12,color:P2,fontWeight:700,marginTop:4}},["✓ Photo added"]);
+      photoDrop.append(img,chk);
+    } else {
+      photoDrop.append(div({style:{fontSize:32}},["📷"]),
+        div({style:{fontSize:14,color:"#9ca3af",fontWeight:600,marginTop:4}},["Add Photo"]),
+        div({style:{fontSize:11,color:"#d1d5db",marginTop:4}},["AI will use it to categorize"]));
+    }
+    s1.append(photoDrop,fileInp);
+
+    const analyzeBtn=btn({style:{width:"100%",padding:"13px 0",borderRadius:12,border:"none",
+      background:ACC,color:"white",fontWeight:700,fontSize:14,cursor:"pointer",
+      display:"flex",alignItems:"center",justifyContent:"center",gap:8,
+      opacity:state.form.description?1:0.4},
+      onClick:async()=>{
+        if(!state.form.description)return;
+        state.step=2; state.aiLoading=true; render();
+        try{
+          const raw=await callAI(`You are an AI for a civic issue platform. Analyze this community issue.
+Issue: "${state.form.description}"
+Location: "${state.form.location||"not specified"}"
+Reply ONLY with valid JSON, no markdown:
+{"title":"concise title max 8 words","category":"pothole|water|streetlight|waste|other","severity":"low|medium|high|critical","department":"government department name","tags":["tag1","tag2"],"priority_reason":"one sentence","estimated_days":7,"actions":["action1","action2","action3"]}`);
+          const clean=raw.replace(/```json|```/g,"").trim();
+          state.analysis=JSON.parse(clean);
+        }catch{
+          state.analysis={title:state.form.description.slice(0,55),category:"other",severity:"medium",
+            department:"Municipal Corporation",tags:["infrastructure"],priority_reason:"Requires municipal attention.",
+            estimated_days:7,actions:["Document the issue","File formal complaint","Follow up"]};
+        }
+        state.aiLoading=false; render();
+      }},["⚡ Analyze with AI →"]);
+    s1.appendChild(analyzeBtn);
+    wrap.appendChild(s1);
+  }
+
+  // Step 2
+  if(state.step===2){
+    if(state.aiLoading){
+      wrap.appendChild(div({style:{textAlign:"center",padding:"60px 0"}},
+        [spinner(40),div({style:{marginTop:16,color:"#9ca3af",fontSize:14}},["AI is analyzing your report…"])]));
+    } else if(state.analysis){
+      const an=state.analysis;
+      const box=div({style:{background:"#f0fdf4",border:"1.5px solid #bbf7d0",borderRadius:18,padding:16,marginBottom:16}});
+      box.appendChild(div({style:{display:"flex",alignItems:"center",gap:8,marginBottom:12}},
+        [div({style:{background:P2,color:"white",borderRadius:99,width:24,height:24,
+          display:"flex",alignItems:"center",justifyContent:"center",fontSize:12}},["⚡"]),
+         span({style:{fontWeight:800,color:P,fontSize:14}},["AI Analysis Complete"])]));
+      const grid=div({style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}});
+      for(const[k,v]of[["Category",(CAT[an.category]?.label||an.category)],["Severity",an.severity],
+          ["Department",an.department],["Est. Fix",an.estimated_days+" days"]]){
+        grid.appendChild(div({style:{background:"white",borderRadius:10,padding:"10px 12px"}},
+          [div({style:{fontSize:11,color:"#9ca3af"}},[k]),
+           div({style:{fontSize:13,fontWeight:700,marginTop:2,
+             color:k==="Severity"?SEV[an.severity]?.c:"#111",textTransform:"capitalize"}},[v])]));
+      }
+      box.appendChild(grid);
+      box.appendChild(div({style:{borderTop:"1px solid #bbf7d0",paddingTop:12}},
+        [div({style:{fontSize:12,fontWeight:700,color:"#6b7280",marginBottom:4}},["Why this severity?"]),
+         p({style:{fontSize:12,color:"#374151"}},[an.priority_reason])]));
+      const acts=div({style:{marginTop:12}});
+      acts.appendChild(div({style:{fontSize:12,fontWeight:700,color:"#6b7280",marginBottom:6}},["Recommended Actions"]));
+      for(const a of an.actions)acts.appendChild(div({style:{display:"flex",gap:6,marginBottom:4}},
+        [span({style:{color:P2,fontSize:12}},["→"]),span({style:{fontSize:12,color:"#374151"}},[a])]));
+      box.appendChild(acts);
+      wrap.appendChild(box);
+
+      const titleLbl=h("label",{style:{fontSize:12,fontWeight:700,color:"#374151",display:"block",marginBottom:6}},["Issue Title (editable)"]);
+      const titleInp=h("input",{style:{width:"100%",border:"1.5px solid #e5e7eb",borderRadius:12,
+        padding:"12px 14px",fontSize:14,outline:"none",marginBottom:16},value:an.title});
+      titleInp.addEventListener("input",e=>{state.analysis={...state.analysis,title:e.target.value};});
+      wrap.append(titleLbl,titleInp);
+
+      const row=div({style:{display:"flex",gap:10}});
+      row.appendChild(btn({style:{flex:1,padding:"13px 0",borderRadius:12,background:"white",border:"1.5px solid #e5e7eb",
+        color:"#6b7280",fontWeight:700,fontSize:14,cursor:"pointer"},
+        onClick:()=>{state.step=1;render();}},["← Edit"]));
+      row.appendChild(btn({style:{flex:1,padding:"13px 0",borderRadius:12,background:P2,color:"white",
+        fontWeight:700,fontSize:14,cursor:"pointer",border:"none"},
+        onClick:()=>{state.step=3;render();}},["Confirm →"]));
+      wrap.appendChild(row);
+    }
+  }
+
+  // Step 3
+  if(state.step===3){
+    const an=state.analysis;
+    const reviewCard=div({style:{background:"white",borderRadius:18,padding:16,
+      boxShadow:"0 1px 4px rgba(0,0,0,.07)",marginBottom:12}});
+    reviewCard.appendChild(div({style:{fontWeight:800,fontSize:15,marginBottom:12}},["Review Before Submitting"]));
+    for(const[k,v]of[["Title",an?.title],["Category",CAT[an?.category]?.label],["Severity",an?.severity],
+        ["Location",state.form.location||"—"],["Department",an?.department],["Est. Resolution","~"+an?.estimated_days+" days"]]){
+      const row=div({style:{display:"flex",justifyContent:"space-between",padding:"8px 0",borderBottom:"1px solid #f9fafb"}});
+      row.append(span({style:{fontSize:12,color:"#9ca3af"}},[k]),
+        span({style:{fontSize:12,fontWeight:700,color:"#111",textAlign:"right",maxWidth:"60%"}},[v||"—"]));
+      reviewCard.appendChild(row);
+    }
+    wrap.appendChild(reviewCard);
+
+    if(an?.tags?.length){
+      const tagRow=div({style:{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}});
+      for(const t of an.tags)tagRow.appendChild(span({style:{background:"#f0fdf4",color:P2,
+        fontSize:11,fontWeight:700,padding:"3px 10px",borderRadius:99}},["#"+t]));
+      wrap.appendChild(tagRow);
+    }
+
+    wrap.appendChild(div({style:{background:"#fef3c7",borderRadius:12,padding:12,textAlign:"center",
+      fontSize:13,fontWeight:600,color:"#92400e",marginBottom:16}},
+      ["🌟 Earn 50 points for submitting!"]));
+
+    const row=div({style:{display:"flex",gap:10}});
+    row.appendChild(btn({style:{flex:1,padding:"13px 0",borderRadius:12,background:"white",
+      border:"1.5px solid #e5e7eb",color:"#6b7280",fontWeight:700,fontSize:14,cursor:"pointer"},
+      onClick:()=>{state.step=2;render();}},["← Back"]));
+    row.appendChild(btn({style:{flex:1,padding:"13px 0",borderRadius:12,background:P,color:"white",
+      fontWeight:700,fontSize:14,cursor:"pointer",border:"none"},
+      onClick:()=>{
+        const ni={id:Date.now()+"",title:state.analysis?.title||state.form.description.slice(0,60),
+          category:state.analysis?.category||"other",severity:state.analysis?.severity||"medium",
+          description:state.form.description,location:state.form.location||"Not provided",
+          status:"reported",upvotes:1,reporter:"You",timestamp:Date.now(),
+          department:state.analysis?.department||"Municipal Corporation",
+          verified:false,verifications:1,comments:0,tags:state.analysis?.tags||[]};
+        state.issues=[...state.issues,ni];
+        try{localStorage.setItem("cl-issues",JSON.stringify(state.issues.filter(i=>i.reporter==="You")));}catch{}
+        state.pts+=50; state.done=true; render();
+        setTimeout(()=>{state.done=false;state.view="feed";state.step=1;
+          state.form={description:"",location:""};state.analysis=null;state.imgPrev=null;render();},2500);
+      }},["Submit Report"]));
+    wrap.appendChild(row);
+  }
+  return wrap;
+}
+
+function renderDashboard(){
+  const wrap=div({});
+  const resolved=state.issues.filter(i=>i.status==="resolved").length;
+  const active=state.issues.filter(i=>i.status!=="resolved").length;
+
+  // Stat cards
+  const grid=div({style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}});
+  for(const s of [{l:"Total Reports",v:state.issues.length,e:"📍",bg:"#f0fdf4",c:P2},
+      {l:"Resolved",v:resolved,e:"✅",bg:"#ecfdf5",c:"#059669"},
+      {l:"Active Issues",v:active,e:"⏳",bg:"#fff7ed",c:ACC},
+      {l:"Reporters",v:124,e:"👥",bg:"#eff6ff",c:"#2563eb"}]){
+    grid.appendChild(div({style:{background:"white",borderRadius:18,padding:16,boxShadow:"0 1px 4px rgba(0,0,0,.07)"}},
+      [div({style:{background:s.bg,width:36,height:36,borderRadius:10,display:"flex",
+          alignItems:"center",justifyContent:"center",fontSize:18,marginBottom:8}},[s.e]),
+       div({style:{fontSize:24,fontWeight:900,color:s.c}},[String(s.v)]),
+       span({style:{fontSize:11,color:"#9ca3af"}},[s.l])]));
+  }
+  wrap.appendChild(grid);
+
+  // Bar chart
+  const catData=Object.entries(CAT).map(([k,v])=>({name:v.label.split(" ")[0],count:state.issues.filter(i=>i.category===k).length,fill:v.color})).filter(d=>d.count>0);
+  const barCard=div({style:{background:"white",borderRadius:18,padding:16,boxShadow:"0 1px 4px rgba(0,0,0,.07)",marginBottom:14}});
+  barCard.append(div({style:{fontWeight:800,fontSize:14,marginBottom:12}},["Issues by Category"]),barChart(catData,140));
+  wrap.appendChild(barCard);
+
+  // Line chart
+  const lineCard=div({style:{background:"white",borderRadius:18,padding:16,boxShadow:"0 1px 4px rgba(0,0,0,.07)",marginBottom:14}});
+  const weeklyData=[{d:"Mon",n:4},{d:"Tue",n:7},{d:"Wed",n:3},{d:"Thu",n:9},{d:"Fri",n:6},{d:"Sat",n:11},{d:"Sun",n:5}];
+  lineCard.append(div({style:{fontWeight:800,fontSize:14,marginBottom:12}},["Reports This Week"]));
+  const lc=lineChart(weeklyData,320,110);
+  lc.style.width="100%";
+  lineCard.appendChild(lc);
+  wrap.appendChild(lineCard);
+
+  // Pie chart
+  const staData=Object.entries(STA).map(([k,v])=>({name:v.label,value:state.issues.filter(i=>i.status===k).length,fill:v.c}));
+  const pieCard=div({style:{background:"white",borderRadius:18,padding:16,boxShadow:"0 1px 4px rgba(0,0,0,.07)",marginBottom:14}});
+  pieCard.appendChild(div({style:{fontWeight:800,fontSize:14,marginBottom:12}},["Status Breakdown"]));
+  const pieRow=div({style:{display:"flex",alignItems:"center",gap:12}});
+  pieRow.appendChild(pieChart(staData,120));
+  const legend=div({style:{flex:1}});
+  for(const d of staData.filter(d=>d.value>0)){
+    const row=div({style:{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}});
+    row.append(div({style:{display:"flex",alignItems:"center",gap:8}},
+      [div({style:{width:10,height:10,borderRadius:99,background:d.fill}}),span({style:{fontSize:12,color:"#374151"}},[d.name])]),
+      span({style:{fontSize:12,fontWeight:900,color:"#111"}},[String(d.value)]));
+    legend.appendChild(row);
+  }
+  pieRow.appendChild(legend);
+  pieCard.appendChild(pieRow);
+  wrap.appendChild(pieCard);
+
+  // AI Insights
+  const insight=div({style:{background:`linear-gradient(135deg,${P} 0%,#166534 100%)`,borderRadius:18,padding:16,color:"white"}});
+  const insTop=div({style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}});
+  insTop.appendChild(span({style:{fontWeight:800,fontSize:14}},["⚡ AI Insights"]));
+  const genBtn=btn({style:{display:"flex",alignItems:"center",gap:6,background:"rgba(255,255,255,.15)",
+    border:"none",color:"white",borderRadius:99,padding:"5px 12px",fontSize:11,fontWeight:700,cursor:"pointer"},
+    onClick:async()=>{
+      state.insightLoading=true;render();
+      const summary=state.issues.map(i=>`${i.category}(${i.severity}) at ${i.location}`).join("; ");
+      try{
+        state.insightText=await callAI(`Civic analyst: analyze these community issues and give 4 specific data-driven insights with emojis, one per line:\n${summary}`);
+      }catch{state.insightText="• Could not load insights. Check your API key.";}
+      state.insightLoading=false;render();
+    }});
+  if(state.insightLoading){genBtn.append(spinner(12,"white"),span({},[" Thinking…"]));}
+  else{genBtn.append(span({},[" 🔄 "]),span({},[" Generate"]));}
+  insTop.appendChild(genBtn);
+  insight.appendChild(insTop);
+  const defaultInsights=`🔴 ${state.issues.filter(i=>i.category==="pothole").length} pothole reports — possible systemic road decay on key corridors
+📈 Saturday peaks at 11 reports — recommend weekend rapid response team
+✅ ${Math.round((resolved/state.issues.length)*100)}% resolution rate — above national civic average of 43%
+💧 Water burst unresolved — escalate to Water Board emergency line immediately`;
+  const textToShow=state.insightText||defaultInsights;
+  for(const line of textToShow.split("\n").filter(Boolean)){
+    insight.appendChild(p({style:{fontSize:12,color:"rgba(255,255,255,.8)",lineHeight:1.6,marginBottom:4}},[line]));
+  }
+  if(!state.insightText)insight.appendChild(p({style:{fontSize:11,color:"rgba(255,255,255,.4)",marginTop:8,fontStyle:"italic"}},["↑ Click Generate for live AI analysis"]));
+  wrap.appendChild(insight);
+  return wrap;
+}
+
+function renderProfile(){
+  const wrap=div({});
+  const level=state.pts<500?"Citizen Hero":state.pts<1000?"Community Leader":"City Champion";
+  const next=state.pts<500?500:state.pts<1000?1000:2000;
+  const prog=Math.min((state.pts/next)*100,100);
+  const myI=state.issues.filter(i=>i.reporter==="You");
+
+  // Hero card
+  const hero=div({style:{background:`linear-gradient(135deg,${P} 0%,#166534 100%)`,
+    borderRadius:18,padding:20,color:"white",marginBottom:14}});
+  const heroTop=div({style:{display:"flex",alignItems:"center",gap:16}});
+  heroTop.append(div({style:{width:64,height:64,background:"rgba(255,255,255,.2)",borderRadius:16,
+    display:"flex",alignItems:"center",justifyContent:"center",fontSize:32}},["👤"]));
+  const heroInfo=div({style:{flex:1}});
+  heroInfo.append(div({style:{fontWeight:900,fontSize:18}},["You"]),
+    div({style:{color:"rgba(255,255,255,.6)",fontSize:12}},[level]));
+  const progressBar=div({style:{background:"rgba(255,255,255,.2)",borderRadius:99,height:6,marginTop:8,overflow:"hidden"}});
+  progressBar.appendChild(div({style:{background:"white",borderRadius:99,height:6,width:prog+"%"}}));
+  heroInfo.appendChild(progressBar);
+  heroInfo.appendChild(div({style:{fontSize:11,color:"rgba(255,255,255,.6)",marginTop:4}},[(next-state.pts)+" pts to next level"]));
+  heroTop.appendChild(heroInfo);
+  hero.appendChild(heroTop);
+  const heroStats=div({style:{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginTop:16}});
+  for(const s of [{l:"Reports",v:myI.length},{l:"Points",v:state.pts},{l:"Rank",v:"#5"}]){
+    heroStats.appendChild(div({style:{background:"rgba(255,255,255,.2)",borderRadius:12,padding:10,textAlign:"center"}},
+      [div({style:{fontWeight:900,fontSize:16}},[String(s.v)]),div({style:{fontSize:11,color:"rgba(255,255,255,.6)"}},[s.l])]));
+  }
+  hero.appendChild(heroStats);
+  wrap.appendChild(hero);
+
+  // Badges
+  const badges=[{l:"First Step",e:"🏁",got:myI.length>=1},{l:"5 Reports",e:"⭐",got:myI.length>=5},
+    {l:"Civic Voice",e:"📣",got:state.pts>=100},{l:"Watchdog",e:"🛡️",got:state.pts>=200},
+    {l:"Community ★",e:"🌟",got:state.pts>=300},{l:"500 Club",e:"💎",got:state.pts>=500}];
+  const badgeCard=div({style:{background:"white",borderRadius:18,padding:16,boxShadow:"0 1px 4px rgba(0,0,0,.07)",marginBottom:14}});
+  badgeCard.appendChild(div({style:{fontWeight:800,fontSize:14,marginBottom:12}},["Badges"]));
+  const badgeGrid=div({style:{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10}});
+  for(const b of badges){
+    badgeGrid.appendChild(div({style:{background:b.got?"#f0fdf4":"#f9fafb",borderRadius:12,
+      padding:"12px 8px",textAlign:"center",opacity:b.got?1:0.4}},
+      [div({style:{fontSize:26}},[b.e]),div({style:{fontSize:11,fontWeight:700,color:"#374151",marginTop:4,lineHeight:1.3}},[b.l])]));
+  }
+  badgeCard.appendChild(badgeGrid);
+  wrap.appendChild(badgeCard);
+
+  // Leaderboard
+  const lbCard=div({style:{background:"white",borderRadius:18,padding:16,boxShadow:"0 1px 4px rgba(0,0,0,.07)",marginBottom:14}});
+  lbCard.appendChild(div({style:{display:"flex",alignItems:"center",gap:8,marginBottom:12}},
+    [span({style:{fontSize:18}},["🏆"]),span({style:{fontWeight:800,fontSize:14}},["Community Leaderboard"])]));
+  for(const u of BOARD){
+    const row=div({style:{display:"flex",alignItems:"center",gap:12,padding:"10px 12px",borderRadius:12,marginBottom:8,
+      background:u.me?"#f0fdf4":"#f9fafb",border:u.me?"1.5px solid #bbf7d0":"none"}});
+    row.append(span({style:{fontSize:20,width:28,textAlign:"center"}},[u.medal]),
+      div({style:{flex:1}},
+        [div({style:{fontSize:14,fontWeight:700,color:u.me?P2:"#111"}},[u.name+(u.me?" (You)":"")]),
+         div({style:{fontSize:11,color:"#9ca3af"}},[u.issues+" issues reported"])]),
+      div({style:{fontWeight:900,fontSize:14,color:u.me?P2:"#111"}},[String(u.pts)]));
+    lbCard.appendChild(row);
+  }
+  wrap.appendChild(lbCard);
+
+  if(myI.length>0){
+    const myCard=div({style:{background:"white",borderRadius:18,padding:16,boxShadow:"0 1px 4px rgba(0,0,0,.07)"}});
+    myCard.appendChild(div({style:{fontWeight:800,fontSize:14,marginBottom:12}},["My Reports"]));
+    for(const i of myI){
+      const s=STA[i.status];
+      const row=div({style:{display:"flex",justifyContent:"space-between",alignItems:"center",
+        padding:10,background:"#f9fafb",borderRadius:10,marginBottom:8}});
+      row.append(div({style:{flex:1,minWidth:0}},
+        [div({style:{fontSize:13,fontWeight:700,color:"#111",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}},[i.title]),
+         div({style:{fontSize:11,color:"#9ca3af"}},[ago(i.timestamp)])]),
+        span({style:{fontSize:12,fontWeight:700,color:s?.c,marginLeft:8}},[s?.label]));
+      myCard.appendChild(row);
+    }
+    wrap.appendChild(myCard);
+  }
+  return wrap;
+}
+
+// Modals
+function renderDetail(){
+  if(!state.selected)return null;
+  const i=state.selected;
+  const cat=CAT[i.category]||CAT.other;
+  const sev=SEV[i.severity]||SEV.medium;
+  const curStep=STATUS_STEPS.indexOf(i.status);
+
+  const overlay=div({style:{position:"fixed",inset:0,background:"rgba(0,0,0,.6)",zIndex:50,
+    display:"flex",alignItems:"flex-end",justifyContent:"center"}});
+  overlay.addEventListener("click",()=>{state.selected=null;render();});
+  const modal=div({style:{background:"white",width:"100%",maxWidth:480,
+    borderRadius:"24px 24px 0 0",maxHeight:"88vh",overflowY:"auto"}});
+  modal.addEventListener("click",e=>e.stopPropagation());
+
+  modal.appendChild(div({style:{padding:"12px 0 4px",display:"flex",justifyContent:"center"}},
+    [div({style:{width:40,height:4,background:"#e5e7eb",borderRadius:99}})]));
+
+  const header=div({style:{padding:"12px 20px 16px",borderBottom:"1px solid #f9fafb",display:"flex",gap:12}});
+  const headerInfo=div({style:{flex:1}});
+  const hBadges=div({style:{display:"flex",gap:4,flexWrap:"wrap",marginBottom:8}});
+  hBadges.append(pill(cat.label,cat.color,cat.bg),pill(sev.label,sev.c,sev.bg));
+  if(i.verified)hBadges.appendChild(pill("✓ Verified","#2563eb","#dbeafe"));
+  headerInfo.append(hBadges,div({style:{fontWeight:900,fontSize:16,lineHeight:1.3}},[i.title]));
+  const closeBtn=btn({style:{background:"#f3f4f6",border:"none",borderRadius:99,width:34,height:34,
+    fontSize:16,cursor:"pointer",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"},
+    onClick:()=>{state.selected=null;render();}},["✕"]);
+  header.append(headerInfo,closeBtn);
+  modal.appendChild(header);
+
+  const body=div({style:{padding:20}});
+
+  // Description
+  body.appendChild(div({style:{marginBottom:16}},
+    [div({style:{fontSize:11,fontWeight:700,color:"#9ca3af",textTransform:"uppercase",letterSpacing:".05em",marginBottom:6}},["Description"]),
+     p({style:{fontSize:14,color:"#374151",lineHeight:1.6}},[i.description])]));
+
+  // Meta
+  const meta=div({style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,
+    background:"#f9fafb",borderRadius:14,padding:12,marginBottom:16}});
+  for(const[k,v]of[["📍 Location",i.location],["🏛️ Department",i.department],
+      ["👤 Reporter",i.reporter],["🕐 Reported",ago(i.timestamp)]]){
+    meta.appendChild(div({},
+      [div({style:{fontSize:11,color:"#9ca3af"}},[k]),
+       div({style:{fontSize:13,fontWeight:700,color:"#111",marginTop:2,lineHeight:1.3}},[v])]));
+  }
+  body.appendChild(meta);
+
+  // Timeline
+  body.appendChild(div({style:{fontSize:11,fontWeight:700,color:"#9ca3af",textTransform:"uppercase",letterSpacing:".05em",marginBottom:12}},["Resolution Progress"]));
+  const timeline=div({style:{display:"flex",alignItems:"flex-start",marginBottom:16}});
+  for(let idx=0;idx<STATUS_STEPS.length;idx++){
+    const st=STATUS_STEPS[idx]; const cfg=STA[st]; const ok=idx<=curStep;
+    const col=div({style:{display:"flex",flexDirection:"column",alignItems:"center",flex:1}});
+    col.append(div({style:{width:32,height:32,borderRadius:99,display:"flex",alignItems:"center",justifyContent:"center",
+      fontSize:16,background:ok?P2:"#e5e7eb"}},[cfg.icon]),
+      div({style:{fontSize:10,marginTop:4,textAlign:"center",fontWeight:ok?700:400,
+        color:ok?P:"#9ca3af",lineHeight:1.2}},[cfg.label]));
+    timeline.appendChild(col);
+    if(idx<3)timeline.appendChild(div({style:{height:3,flex:1,background:idx<curStep?P2:"#e5e7eb",marginTop:15,borderRadius:2}}));
+  }
+  body.appendChild(timeline);
+
+  if(i.tags?.length){
+    const tagRow=div({style:{display:"flex",gap:6,flexWrap:"wrap",marginBottom:16}});
+    for(const t of i.tags)tagRow.appendChild(span({style:{background:"#f3f4f6",color:"#6b7280",
+      fontSize:11,fontWeight:600,padding:"3px 10px",borderRadius:99}},["#"+t]));
+    body.appendChild(tagRow);
+  }
+
+  const actRow=div({style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}});
+  actRow.append(
+    btn({style:{padding:"13px 0",borderRadius:12,border:"none",background:"#f0fdf4",color:P2,
+      fontWeight:700,fontSize:14,cursor:"pointer"},
+      onClick:()=>{state.issues=state.issues.map(x=>x.id===i.id?{...x,upvotes:x.upvotes+1}:x);
+        state.selected={...state.selected,upvotes:state.selected.upvotes+1};state.pts+=5;render();}},
+      ["👍 Upvote ("+i.upvotes+")"]),
+    btn({style:{padding:"13px 0",borderRadius:12,border:"none",background:"#eff6ff",color:"#2563eb",
+      fontWeight:700,fontSize:14,cursor:"pointer"},
+      onClick:async()=>{state.showC=true;state.cLoading=true;render();
+        try{state.complaint=await callAI(`Write a formal complaint letter from a citizen to "${i.department}":
+Title: ${i.title}, Location: ${i.location}, Description: ${i.description}, Severity: ${i.severity}, Community Upvotes: ${i.upvotes}
+Under 220 words. Date:[DATE], formal greeting, problem statement, community impact, request 7-day resolution, formal closing with [Your Name][Contact].`);}
+        catch{state.complaint="Could not generate. Please retry.";}
+        state.cLoading=false;render();}},["📄 Complaint"]));
+  body.append(actRow,
+    btn({style:{width:"100%",padding:"13px 0",borderRadius:12,border:`2px solid ${P2}`,background:"white",
+      color:P2,fontWeight:700,fontSize:14,cursor:"pointer"}},["🛡️ Verify this Issue (+10 pts)"]));
+  modal.appendChild(body);
+  overlay.appendChild(modal);
+  return overlay;
+}
+
+function renderComplaint(){
+  if(!state.showC)return null;
+  const overlay=div({style:{position:"fixed",inset:0,background:"rgba(0,0,0,.6)",zIndex:60,
+    display:"flex",alignItems:"flex-end",justifyContent:"center"}});
+  overlay.addEventListener("click",()=>{state.showC=false;render();});
+  const modal=div({style:{background:"white",width:"100%",maxWidth:480,
+    borderRadius:"24px 24px 0 0",maxHeight:"80vh",overflowY:"auto"}});
+  modal.addEventListener("click",e=>e.stopPropagation());
+  modal.appendChild(div({style:{padding:"12px 0 4px",display:"flex",justifyContent:"center"}},
+    [div({style:{width:40,height:4,background:"#e5e7eb",borderRadius:99}})]));
+  const mHeader=div({style:{padding:"12px 20px 14px",borderBottom:"1px solid #f9fafb",
+    display:"flex",justifyContent:"space-between",alignItems:"center"}});
+  mHeader.append(div({style:{display:"flex",alignItems:"center",gap:8}},
+    [div({style:{background:"#eff6ff",width:32,height:32,borderRadius:10,
+      display:"flex",alignItems:"center",justifyContent:"center"}},["📄"]),
+     span({style:{fontWeight:800,fontSize:14}},["Official Complaint Letter"])]),
+    btn({style:{background:"#f3f4f6",border:"none",borderRadius:99,width:32,height:32,cursor:"pointer"}},["✕"]));
+  mHeader.querySelector("button").addEventListener("click",()=>{state.showC=false;render();});
+  modal.appendChild(mHeader);
+  const body=div({style:{padding:20}});
+  if(state.cLoading){
+    body.append(div({style:{textAlign:"center",padding:"48px 0"}},
+      [spinner(36,"#2563eb"),div({style:{marginTop:12,color:"#9ca3af",fontSize:14}},["AI is drafting your complaint…"])]));
+  } else {
+    body.append(div({style:{background:"#f9fafb",border:"1px solid #e5e7eb",borderRadius:14,padding:16,
+      fontSize:12,color:"#374151",lineHeight:1.7,whiteSpace:"pre-wrap",fontFamily:"monospace",marginBottom:16}},
+      [state.complaint]),
+      btn({style:{width:"100%",padding:"13px 0",borderRadius:12,border:"none",background:"#2563eb",
+        color:"white",fontWeight:700,fontSize:14,cursor:"pointer"},
+        onClick:()=>navigator.clipboard?.writeText(state.complaint).catch(()=>{})},["📋 Copy Letter"]));
+  }
+  modal.appendChild(body);
+  overlay.appendChild(modal);
+  return overlay;
+}
+
+// Main Render
+function render(){
+  const root=document.getElementById("root");
+  root.innerHTML="";
+
+  const app=div({style:{maxWidth:480,margin:"0 auto",minHeight:"100vh",
+    display:"flex",flexDirection:"column",position:"relative",background:"#f0fdf4"}});
+
+  // Header
+  const header=div({style:{position:"sticky",top:0,zIndex:40,background:"white",
+    borderBottom:"1px solid #f3f4f6",padding:"12px 16px",display:"flex",
+    justifyContent:"space-between",alignItems:"center",boxShadow:"0 1px 8px rgba(0,0,0,.06)"}});
+  const titles={feed:"CivicLens 🌿",report:"Report Issue",dashboard:"Community Data",profile:"My Profile"};
+  header.append(span({style:{fontWeight:900,fontSize:18,color:P}},[titles[state.view]]),
+    div({style:{display:"flex",alignItems:"center",gap:8}},
+      [div({style:{background:P2,color:"white",borderRadius:99,padding:"6px 12px",fontSize:12,fontWeight:800}},["🌟 "+state.pts]),
+       div({style:{background:"#f3f4f6",width:34,height:34,borderRadius:99,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16}},["🔔"])]));
+  app.appendChild(header);
+
+  // Content
+  const content=div({style:{flex:1,overflowY:"auto",padding:"16px 16px 100px"}});
+  if(state.view==="feed")content.appendChild(renderFeed());
+  if(state.view==="report")content.appendChild(renderReport());
+  if(state.view==="dashboard")content.appendChild(renderDashboard());
+  if(state.view==="profile")content.appendChild(renderProfile());
+  app.appendChild(content);
+
+  // Bottom nav
+  const nav=div({style:{position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",
+    width:"100%",maxWidth:480,background:"white",borderTop:"1px solid #f3f4f6",
+    padding:"8px 8px 16px",zIndex:40,boxShadow:"0 -2px 12px rgba(0,0,0,.06)"}});
+  const navRow=div({style:{display:"flex",justifyContent:"space-around",alignItems:"flex-end"}});
+  for(const[k,l,e]of[["feed","Feed","🏠"],["report","Report","➕"],["dashboard","Insights","📊"],["profile","Profile","👤"]]){
+    const active=state.view===k; const isRep=k==="report";
+    const b=btn({style:{display:"flex",flexDirection:"column",alignItems:"center",gap:3,
+      background:"none",border:"none",cursor:"pointer",flex:1,padding:"4px 0"},
+      onClick:()=>{state.view=k;if(k==="report"){state.step=1;state.analysis=null;state.imgPrev=null;}render();}});
+    if(isRep){
+      b.appendChild(div({style:{background:ACC,width:48,height:48,borderRadius:16,display:"flex",
+        alignItems:"center",justifyContent:"center",fontSize:22,marginTop:-20,
+        boxShadow:"0 4px 16px rgba(234,88,12,.4)"}},[e]));
+    } else {
+      b.appendChild(div({style:{width:36,height:28,borderRadius:10,display:"flex",alignItems:"center",
+        justifyContent:"center",fontSize:20,background:active?"#dcfce7":"transparent"}},[e]));
+    }
+    b.appendChild(span({style:{fontSize:11,fontWeight:700,color:isRep?ACC:active?P2:"#9ca3af"}},[l]));
+    navRow.appendChild(b);
+  }
+  nav.appendChild(navRow);
+  app.appendChild(nav);
+
+  // Modals
+  const detail=renderDetail(); if(detail)app.appendChild(detail);
+  const complaint=renderComplaint(); if(complaint)app.appendChild(complaint);
+
+  root.appendChild(app);
+}
+
+render();
+</script>
+</body>
+</html>
